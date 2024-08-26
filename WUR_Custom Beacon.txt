@@ -1,0 +1,701 @@
+/**
+ ******************************************************************************
+ *
+ * @file WURX_adv.c
+ *
+ * @brief Wakeup Receiver advertisement application
+ *
+ * Copyright (C) Atmosic 2021-2023
+ *
+ ******************************************************************************
+ */
+
+#include "arch.h"
+#include <inttypes.h>
+#include "at_wrpr.h"
+#include "atm_adv.h"
+#include "atm_asm.h"
+#include "atm_gap_param.h"
+#include "atm_pm.h"
+#include "sw_timer.h"
+#include "timer.h"
+#include "wurx.h"
+#include "sths34pf80_reg.h"  // Include the sensor header
+#include "atm_gpio.h"
+#ifdef AUTO_TEST
+#include "uart_stdout.h"
+#endif
+
+
+#ifdef CFG_PHONE_WAKEUP
+#include "reg_blecore.h"
+#include "calibration.h"
+#include "at_apb_pseq_regs_core_macro.h"
+#include "spi.h"
+#include "pmu_spi.h"
+#include "pmu_top_regs_core_macro.h"
+#include "pmu_wurx_regs_core_macro.h"
+
+#define BT_INQUIRY_WURX_GENERAL_REG_ADDR ( \
+    WURX_WURX_GENERAL__WURX_SELECT__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX0_EN_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX0_EN_VAL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX1_EN_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX1_EN_VAL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__BIAS_AMP__WRITE(0x4) | \
+    WURX_WURX_GENERAL__WURX_DEFAULT_CAL__WRITE(0x64) | \
+    WURX_WURX_GENERAL__ANALOG_CAL_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX_THR_CAL_EN__WRITE(0x1) | \
+    WURX_WURX_GENERAL__ANALOG_AMPCALP__WRITE(0x4) | \
+    WURX_WURX_GENERAL__ANALOG_AMPCALN__WRITE(0x4) | \
+    WURX_WURX_GENERAL__ATBSEL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WAKEUP0_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WAKEUP0_OVR_VAL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WAKEUP1_OVR__WRITE(0x1) | \
+    WURX_WURX_GENERAL__WAKEUP1_OVR_VAL__WRITE(0x0) \
+)
+#define BT_INQUIRY_WURX0_0_REG_ADDR (WURX_WURX0_0__WURX0_UID__WRITE(0xAAAA))
+#define BT_INQUIRY_WURX0_1_REG_ADDR (WURX_WURX0_1__WURX0_GID__WRITE(0xAAAA))
+#define BT_INQUIRY_WURX0_2_REG_ADDR ( \
+    WURX_WURX0_2__WURX0_ERR_THRESHOLD__WRITE(0xE) | \
+    WURX_WURX0_2__WURX0_TOO_LO1__WRITE(0x3) | \
+    WURX_WURX0_2__WURX0_TOO_LO2__WRITE(0xF) | \
+    WURX_WURX0_2__WURX0_TOO_HI__WRITE(0xF) | \
+    WURX_WURX0_2__WURX0_CORR_LENGTH__WRITE(0x10) | \
+    WURX_WURX0_2__WURX0_THR_LENGTH__WRITE(0x1) \
+)
+#define BT_INQUIRY_WURX0_3_REG_ADDR ( \
+    WURX_WURX0_3__WURX0_ENERGY_TOOLOW__WRITE(0x4) | \
+    WURX_WURX0_3__WURX0_ENERGY_TOOHIGH__WRITE(0x6) | \
+    WURX_WURX0_3__WURX0_SYM1_THRESHOLD__WRITE(0x2) | \
+    WURX_WURX0_3__WURX0_CLK_FREQ__WRITE (0x1) \
+)
+#define BT_INQUIRY_WURX0_4_REG_ADDR ( \
+    WURX_WURX0_4__WURX0_TIMER_MAX__WRITE(0x13) | \
+    WURX_WURX0_4__WURX0_SYM_SILENT_THR__WRITE(0x1F) | \
+    WURX_WURX0_4__WURX0_INIT_CAL_STEP__WRITE(0x64) | \
+    WURX_WURX0_4__WURX0_CAL_SILENT_THR__WRITE(0x7F) \
+)
+#define BT_INQUIRY_WURX1_0_REG_ADDR ( \
+    WURX_WURX1_0__WURX1_THR_MIN__WRITE(0x1) | \
+    WURX_WURX1_0__WURX1_THR_MAX__WRITE(0xC8) | \
+    WURX_WURX1_0__WURX1_THR_STEP__WRITE(0x1) | \
+    WURX_WURX1_0__WURX1_MAX_REP__WRITE(0x1) | \
+    WURX_WURX1_0__WURX1_CLK_FREQ__WRITE(0x0) \
+)
+#define BT_INQUIRY_WURX1_1_REG_ADDR ( \
+    WURX_WURX1_1__WURX1_THR_TIMER_MAX__WRITE(0x10B) \
+)
+
+#define IBEACON_WURX_GENERAL_REG_ADDR ( \
+    WURX_WURX_GENERAL__WURX_SELECT__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX0_EN_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX0_EN_VAL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX1_EN_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX1_EN_VAL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__BIAS_AMP__WRITE(0x4) | \
+    WURX_WURX_GENERAL__WURX_DEFAULT_CAL__WRITE(0x77) | \
+    WURX_WURX_GENERAL__ANALOG_CAL_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WURX_THR_CAL_EN__WRITE(0x1) | \
+    WURX_WURX_GENERAL__ANALOG_AMPCALP__WRITE(0x4) | \
+    WURX_WURX_GENERAL__ANALOG_AMPCALN__WRITE(0x4) | \
+    WURX_WURX_GENERAL__ATBSEL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WAKEUP0_OVR__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WAKEUP0_OVR_VAL__WRITE(0x0) | \
+    WURX_WURX_GENERAL__WAKEUP1_OVR__WRITE(0x1) | \
+    WURX_WURX_GENERAL__WAKEUP1_OVR_VAL__WRITE(0x0) \
+)
+#define IBEACON_WURX0_0_REG_ADDR (WURX_WURX0_0__WURX0_UID__WRITE(0x3330))
+#define IBEACON_WURX0_1_REG_ADDR (WURX_WURX0_1__WURX0_GID__WRITE(0x3330))
+#define IBEACON_WURX0_2_REG_ADDR ( \
+    WURX_WURX0_2__WURX0_ERR_THRESHOLD__WRITE(0x10) | \
+    WURX_WURX0_2__WURX0_TOO_LO1__WRITE(0x3) | \
+    WURX_WURX0_2__WURX0_TOO_LO2__WRITE(0xF) | \
+    WURX_WURX0_2__WURX0_TOO_HI__WRITE(0xF) | \
+    WURX_WURX0_2__WURX0_CORR_LENGTH__WRITE(0x10) | \
+    WURX_WURX0_2__WURX0_THR_LENGTH__WRITE(0x1) \
+)
+#define IBEACON_WURX0_3_REG_ADDR ( \
+    WURX_WURX0_3__WURX0_ENERGY_TOOLOW__WRITE(0x1) | \
+    WURX_WURX0_3__WURX0_ENERGY_TOOHIGH__WRITE(0x2) | \
+    WURX_WURX0_3__WURX0_SYM1_THRESHOLD__WRITE(0x3) | \
+    WURX_WURX0_3__WURX0_CLK_FREQ__WRITE (0x1) \
+)
+#define IBEACON_WURX0_4_REG_ADDR ( \
+    WURX_WURX0_4__WURX0_TIMER_MAX__WRITE(0x5) | \
+    WURX_WURX0_4__WURX0_SYM_SILENT_THR__WRITE(0x1F) | \
+    WURX_WURX0_4__WURX0_INIT_CAL_STEP__WRITE(0x64) | \
+    WURX_WURX0_4__WURX0_CAL_SILENT_THR__WRITE(0x7F) \
+)
+#define IBEACON_WURX1_0_REG_ADDR BT_INQUIRY_WURX1_0_REG_ADDR
+#define IBEACON_WURX1_1_REG_ADDR BT_INQUIRY_WURX1_1_REG_ADDR
+
+#define GEN_WURX_CONFIG(_type) { \
+    .WURX_GENERAL_REG_ADDR = _type##_WURX_GENERAL_REG_ADDR, \
+    .WURX0_0_REG_ADDR = _type##_WURX0_0_REG_ADDR, \
+    .WURX0_1_REG_ADDR = _type##_WURX0_1_REG_ADDR, \
+    .WURX0_2_REG_ADDR = _type##_WURX0_2_REG_ADDR, \
+    .WURX0_3_REG_ADDR = _type##_WURX0_3_REG_ADDR, \
+    .WURX0_4_REG_ADDR = _type##_WURX0_4_REG_ADDR, \
+    .WURX1_0_REG_ADDR = _type##_WURX1_0_REG_ADDR, \
+    .WURX1_1_REG_ADDR = _type##_WURX1_1_REG_ADDR, \
+}
+
+/* BT inquiry WURX pattern config */
+static struct PMU_wurx_s const bt_inquiry_config = GEN_WURX_CONFIG(BT_INQUIRY);
+
+/* iBeacon WURX pattern config */
+static struct PMU_wurx_s const ibeacon_config = GEN_WURX_CONFIG(IBEACON);
+
+static bool swap_config;
+static uint32_t restart_time_csec;
+static sw_timer_id_t tid_restart;
+#endif // CFG_PHONE_WAKEUP
+#include "atm_utils_c.h"
+
+#define S_TBL_IDX 0
+
+ATM_LOG_LOCAL_SETTING("WURX_adv", D);
+
+typedef enum {
+    WURX_S_INIT,
+    WURX_S_GAP_INITIATING,
+    WURX_S_ADV_CREATING,
+    WURX_S_ADV_DATA_CONFIG,
+    WURX_S_ADV_STARTING,
+    WURX_S_ADV_ON,
+    WURX_S_ADV_DELETING,
+    WURX_S_IDLE,
+} wurx_adv_state_t;
+
+typedef enum {
+    WURX_OP_MODULE_INIT,
+    WURX_OP_GAP_INIT_CFM,
+    WURX_OP_CREATE_ADV_CFM,
+    WURX_OP_SET_ADV_DATA_CFM,
+    WURX_OP_START_ADV,
+    WURX_OP_START_ADV_CFM,
+    WURX_OP_RECONFIG_ADV,
+    WURX_OP_DELETE_ADV_CFM,
+    WURX_OP_SLEEP,
+    WURX_OP_END = 0xFF,
+} wurx_adv_op_t;
+
+static uint8_t wurx_act_idx = ATM_INVALID_ADVIDX;
+static pm_lock_id_t wurx_adv_lock_hiber;
+static atm_adv_create_t __ATM_ADV_CREATE_PARAM_CONST *adv_create_ptr;
+static bool adv_wurx;
+static sths34pf80_data_t sensor_data;
+
+/**
+ * @brief Callback registered with the GAP layer.
+ * @note Called after the GAP layer has initialized.
+ * @param status Status for @ref atm_gap_start.
+ */
+static void wurx_gap_init_cfm(ble_err_code_t status)
+{
+    atm_asm_move(S_TBL_IDX, WURX_OP_GAP_INIT_CFM);
+}
+
+/**
+ * @brief Ttriggers GAP initialization. Results in a state machine transition
+ * to WURX_S_GAP_INITIATING
+ * @note Called when system is awake by WURX
+ */
+static void wurx_gap_init(void)
+{
+    // GAP callbacks
+    static atm_gap_cbs_t const gap_callbacks = {
+	.init_cfm = wurx_gap_init_cfm,
+    };
+    atm_gap_start(atm_gap_param_get(), &gap_callbacks);
+}
+
+/**
+ * @brief Callback registered with the atm_adv module.
+ * @note Called upon a state change in the advertising state machine.
+ * @param state Advertising state.
+ * @param act_idx Advertising activity instance index.
+ * @param status Status for previous operation.
+ */
+static void wurx_adv_state_change(atm_adv_state_t state, uint8_t act_idx,
+    ble_err_code_t status)
+{
+    ATM_LOG(V, "%s: %d", __func__, state);
+
+    switch (state) {
+	case ATM_ADV_CREATED:
+	    ASSERT_INFO(status == BLE_ERR_NO_ERROR, act_idx, status);
+	    ATM_LOG(D, "Create %sAdvertisement", adv_wurx ? "WURX " : "");
+	    wurx_act_idx = act_idx;
+	    atm_asm_move(S_TBL_IDX, WURX_OP_CREATE_ADV_CFM);
+	    break;
+	case ATM_ADV_ADVDATA_DONE:
+	case ATM_ADV_SCANDATA_DONE:
+	    atm_asm_move(S_TBL_IDX, WURX_OP_SET_ADV_DATA_CFM);
+	    break;
+	case ATM_ADV_ON:
+	    ASSERT_INFO(status == BLE_ERR_NO_ERROR, act_idx, status);
+	    ATM_LOG(D, "%sAdvertising: ON", adv_wurx ? "WURX " : "");
+	    atm_asm_move(S_TBL_IDX, WURX_OP_START_ADV_CFM);
+	    break;
+	case ATM_ADV_OFF:
+	    ATM_LOG(D, "%sAdvertising: OFF", adv_wurx ? "WURX " : "");
+	    if (adv_wurx) {
+		adv_wurx = false;
+		atm_asm_move(S_TBL_IDX, WURX_OP_RECONFIG_ADV);
+	    } else {
+		atm_asm_move(S_TBL_IDX, WURX_OP_SLEEP);
+	    }
+	    break;
+	case ATM_ADV_DELETED:
+	    atm_asm_move(S_TBL_IDX, WURX_OP_DELETE_ADV_CFM);
+	    break;
+	case ATM_ADV_IDLE:
+	case ATM_ADV_CREATING:
+	case ATM_ADV_ADVDATA_SETTING:
+	case ATM_ADV_SCANDATA_SETTING:
+	case ATM_ADV_STARTING:
+	case ATM_ADV_STOPPING:
+	case ATM_ADV_DELETING:
+	default:
+	    ATM_LOG(D, "Unhandled state = %d", state);
+	    break;
+    }
+}
+
+/**
+ * @brief Register advertisement state change callback and create a
+ * advertisement. Results in a state machine transition to WURX_S_ADV_CREATING
+ * @note Called upon GAP initialization
+ */
+static void wurx_create_adv(void)
+{
+    static atm_adv_create_t create;
+
+    if (atm_adv_create_param_nvds(adv_wurx, &create)) {
+	adv_create_ptr = &create;
+    } else {
+	ATM_LOG(D, "%s: %s create adv param NVDS tag not found. Using Default",
+	    __func__, adv_wurx ? "WURX" : "normal");
+	adv_create_ptr = atm_adv_create_param_get(0);
+    }
+
+    atm_adv_reg(wurx_adv_state_change);
+    ble_err_code_t ret = atm_adv_create(adv_create_ptr);
+    if (ret != BLE_ERR_NO_ERROR) {
+	ATM_LOG(E, "%s: Failed to create adv %#x", __func__, ret);
+    }
+}
+
+/**
+ * @brief Set advertisement data. Results in a state machine transition to
+ * WURX_S_ADV_DATA_CONFIG.
+ * @note Called when advertisement has created.
+ */
+static void wurx_set_adv_data(void)
+{
+    static atm_adv_data_t __ATM_ADV_DATA_PARAM_CONST *adv_data;
+    if (!adv_data) {
+	static atm_adv_data_nvds_t adv_data_nvds;
+	if (atm_adv_data_param_nvds_alloc(adv_wurx ?
+	    BLE_GAPM_NVDS_WURX_ADV_DATA : BLE_GAPM_NVDS_ADV_DATA,
+	    &adv_data_nvds)) {
+	    adv_data = atm_adv_convert_nvds_data_type(&adv_data_nvds);
+	} else {
+	    ATM_LOG(D, "%s: %s adv data NVDS tag not found. Using Default",
+		__func__, adv_wurx ? "WURX" : "normal");
+	    adv_data = atm_adv_advdata_param_get(0);
+	}
+    }
+
+    ble_err_code_t ret = atm_adv_set_data_sanity(adv_create_ptr, adv_data,
+	NULL);
+    if (ret != BLE_ERR_NO_ERROR) {
+	ATM_LOG(E, "%s: Set data sanity failed: %#x", __func__, ret);
+	return;
+    }
+
+    ret = atm_adv_set_adv_data(wurx_act_idx, adv_data);
+    if (ret != BLE_ERR_NO_ERROR) {
+	ATM_LOG(E, "%s: Set adv data failed: %#x", __func__, ret);
+	return;
+    }
+}
+
+static atm_adv_data_t const *adv_data = NULL;
+
+static void update_adv_content(void)
+{
+     // Set P7 high to power on I2C1 sensors
+    atm_gpio_setup(7);          // Setup P7 as a GPIO pin
+    atm_gpio_set_output(7);      // Set P7 as output
+    atm_gpio_write(7, 1);        // Set P7 high to power on the sensors
+
+    // Read the sensor data
+    sths34pf80_get_data(&sensor_data);
+    DEBUG_TRACE("Presence Value is : %d", sensor_data.signed_presence);
+
+    if (sensor_data.signed_presence < 300)
+    {
+        // Determine the message to advertise based on the sensor value
+        const char *message = "TurnOf";
+        uint8_t msg_len = strlen(message);
+
+        // Construct the advertisement data
+        static uint8_t adv_payload[28] = {
+            //0x02, 0x01, 0x06,                 // Flags
+            0x1B, 0xFF,                       // Length and AD type for complete local name
+            0xFE, 0x05, 0xDF, 0x19, 0x01, 0x00, 0x76 // Default local name
+        };
+
+        // Add the custom message to the payload
+        if (msg_len <= 9) { // Ensure message fits in the advertisement payload
+            adv_payload[0] = msg_len + 1;   // Length byte for the custom message
+            adv_payload[1] = 0x09;         // AD type for complete local name
+            memcpy(&adv_payload[2], message, msg_len); // Copy the message
+        } else {
+            DEBUG_TRACE("Message too long for advertisement payload.");
+            return;
+        }
+
+        // Ensure the total length does not exceed the maximum payload size
+        uint8_t total_len = 2 + msg_len;
+        if (total_len > sizeof(adv_payload)) {
+            DEBUG_TRACE("Total advertisement payload length exceeds limit.");
+            return;
+        }
+
+        // Update the advertisement data structure
+        adv_data = &(atm_adv_data_t __ATM_ADV_DATA_PARAM_CONST) {
+            .len = total_len,
+            .data = adv_payload,
+            .buf_len = sizeof(adv_payload),
+        };
+
+        // Set the advertisement data
+        ble_err_code_t ret = atm_adv_set_adv_data(wurx_act_idx, adv_data);
+        if (ret != BLE_ERR_NO_ERROR) {
+            ATM_LOG(E, "%s: Set adv data failed: %d", __func__, ret);
+            return;
+        }
+
+        ATM_LOG(D, "Advertisement updated to: %s", message);
+
+    }
+    else
+    {
+        // Construct the advertisement data based on your given payload
+        static uint8_t adv_payload[28] = {
+            //0x02, 0x01, 0x06,                 // Flags
+            0x1B, 0xFF,                       // Length and AD type for Manufacturer Specific Data
+            0xFE, 0x05, 0xFF, 0x19, 0x01, 0x00, 
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00
+        };
+
+        // Update the advertisement data structure
+        adv_data = &(atm_adv_data_t __ATM_ADV_DATA_PARAM_CONST) {
+            .len = sizeof(adv_payload),
+            .data = adv_payload,
+            .buf_len = sizeof(adv_payload),
+        };
+
+        // Set the advertisement data
+        ble_err_code_t ret = atm_adv_set_adv_data(wurx_act_idx, adv_data);
+        if (ret != BLE_ERR_NO_ERROR) {
+            ATM_LOG(E, "%s: Set adv data failed: %d", __func__, ret);
+            return;
+        }
+
+        ATM_LOG(D, "Advertisement updated with custom payload.");
+    }
+    
+}
+
+/**
+ * @brief Start the advertisement. Results in a state machine transition to
+ * WURX_S_ADV_STARTING
+ * @note Called when advertisement data has been set.
+ */
+static void wurx_start_adv(void)
+{
+    /// Call the function to update advertisement content based on sensor value
+    update_adv_content();
+
+    
+    atm_adv_start_t adv_start_nvds;
+    atm_adv_start_t __ATM_ADV_START_PARAM_CONST *adv_start_ptr;
+
+    if (atm_adv_start_param_nvds(adv_wurx, &adv_start_nvds)) {
+        adv_start_ptr = &adv_start_nvds;
+        } 
+        else 
+        {
+            ATM_LOG(D, "%s: %s adv start param NVDS tag not found. Using Default",
+                __func__, adv_wurx ? "WURX" : "normal");
+            adv_start_ptr = atm_adv_start_param_get(0);
+        }
+
+    // Check if the sensor data is above 1000
+        
+
+        ble_err_code_t ret = atm_adv_start(wurx_act_idx, adv_start_ptr);
+        if (ret != BLE_ERR_NO_ERROR) {
+            ATM_LOG(E, "%s: Failed to start adv with status %#x", __func__, ret);
+            return;
+        }
+}
+
+
+/**
+ * @brief Advertisement started. Results in a state machine transition to
+ * WURX_S_ADV_STARTED.
+ * @note Called when advertisement is turned-on.
+ */
+static void wurx_adv_on(void)
+{
+    atm_asm_set_state_op(S_TBL_IDX, WURX_S_ADV_ON, WURX_OP_END);
+}
+
+/**
+ * @brief Delete advertisement. Results in a state machine transition to
+ * WURX_S_ADV_DELETING.
+ * @note Called when advertisement timeout.
+ */
+static void wurx_delete_adv(void)
+{
+    ble_err_code_t ret = atm_adv_delete(wurx_act_idx);
+    if (ret != BLE_ERR_NO_ERROR) {
+	ATM_LOG(E, "%s Fail to delete adv %#x", __func__, ret);
+    }
+}
+
+/**
+ * @brief Unlock hibernation lock. Results in a state machine transition to
+ * WURX_S_IDLE.
+ * @note Called when advertisement has been stopped and system is going to sleep
+ */
+static void wurx_unlock_hib(void)
+{
+
+    // Read sensor data
+    sths34pf80_get_data(&sensor_data);
+    DEBUG_TRACE("Presence Value is : %d", sensor_data.signed_presence);
+
+    // Set P7 low to power off I2C1 sensors
+    atm_gpio_write(7, 0); // Set P7 low
+
+    // Enable hibernation
+    DEBUG_TRACE("Going to hibernate.");
+    atm_pm_unlock(wurx_adv_lock_hiber);
+#ifdef CFG_PHONE_WAKEUP
+    sw_timer_set(tid_restart, restart_time_csec);
+#endif
+#if defined(AUTO_TEST) && !defined(IS_FOR_SIM)
+    UartEndSimulation();
+#endif
+}
+
+/**
+ * @brief Enable WURX in prevent hibernation vector.
+ * @note Called before the system enters the hibernation mode.
+ * @param prevent Pointer to prevent control.
+ * @param pseq_dur Pointer to hibernation duration.
+ * @param ble_dur BLE sleep duration.
+ */
+__FAST static rep_vec_err_t
+wurx_adv_prevent_hib(bool *prevent, int32_t *pseq_dur, int32_t ble_dur)
+{
+    if (!boot_was_cold()) {
+	wurx_enable();
+    }
+    return RV_NEXT;
+}
+
+#ifdef CFG_PHONE_WAKEUP
+/**
+ * @brief Restart timer callback.
+ * @note Called when restart timer expired.
+ * @param tid Timer ID.
+ * @param ctx Pointer to timer context.
+ */
+static void wurx_restart_timer(uint8_t tid, void const *ctx)
+{
+    if (atm_asm_get_current_state(S_TBL_IDX) == WURX_S_IDLE) {
+	atm_asm_move(S_TBL_IDX, WURX_OP_SLEEP);
+    }
+}
+#endif // CFG_PHONE_WAKEUP
+
+/**
+ * @brief Initialize the app data structures and start its state machine
+ * @note Called after the platform drivers have initialized
+ */
+static rep_vec_err_t wurx_adv_init(void)
+{
+    wurx_adv_lock_hiber = atm_pm_alloc(PM_LOCK_HIBERNATE);
+    atm_pm_lock(wurx_adv_lock_hiber);
+
+    static state_entry const s_tbl[] = {
+	{S_OP(WURX_S_INIT, WURX_OP_MODULE_INIT), WURX_S_GAP_INITIATING,
+	    wurx_gap_init},
+	{S_OP(WURX_S_GAP_INITIATING, WURX_OP_GAP_INIT_CFM), WURX_S_ADV_CREATING,
+	    wurx_create_adv},
+	{S_OP(WURX_S_ADV_CREATING, WURX_OP_CREATE_ADV_CFM),
+	    WURX_S_ADV_DATA_CONFIG, wurx_set_adv_data},
+	{S_OP(WURX_S_ADV_DATA_CONFIG, WURX_OP_SET_ADV_DATA_CFM),
+	    WURX_S_ADV_STARTING, wurx_start_adv},
+	{S_OP(WURX_S_ADV_STARTING, WURX_OP_START_ADV_CFM), WURX_S_ADV_ON,
+	    wurx_adv_on},
+	{S_OP(WURX_S_ADV_STARTING, WURX_OP_SET_ADV_DATA_CFM), WURX_S_ADV_STARTING,
+	    NULL},
+	{S_OP(WURX_S_ADV_ON, WURX_OP_RECONFIG_ADV), WURX_S_ADV_DELETING,
+	    wurx_delete_adv},
+	{S_OP(WURX_S_ADV_DELETING, WURX_OP_DELETE_ADV_CFM), WURX_S_ADV_CREATING,
+	    wurx_create_adv},
+	{S_OP(WURX_S_ADV_ON, WURX_OP_SLEEP), WURX_S_IDLE, wurx_unlock_hib},
+#ifdef CFG_PHONE_WAKEUP
+	{S_OP(WURX_S_IDLE, WURX_OP_RECONFIG_ADV), WURX_S_ADV_DELETING,
+	    wurx_delete_adv},
+	{S_OP(WURX_S_IDLE, WURX_OP_SLEEP), WURX_S_IDLE, wurx_unlock_hib},
+#endif
+    };
+    atm_asm_init_table(S_TBL_IDX, s_tbl, ARRAY_LEN(s_tbl));
+    atm_asm_set_state_op(S_TBL_IDX, WURX_S_INIT, WURX_OP_END);
+
+    if (!boot_was_cold()) {
+	adv_wurx = true;
+	// Disable WURX after system awake to prevent duplicated events
+	wurx_disable();
+    }
+
+#ifdef CFG_PHONE_WAKEUP
+    ble_gapm_get_restart_duration_nvds(&restart_time_csec);
+
+    ATM_LOG(V, "restart duration (ms): %" PRIu32, restart_time_csec * 10);
+
+    if (restart_time_csec) {
+	tid_restart = sw_timer_alloc(wurx_restart_timer, NULL);
+	atm_pm_set_hib_restart_time(restart_time_csec);
+    }
+#endif // CFG_PHONE_WAKEUP
+
+    sths34pf80_init(0);
+
+    uint8_t whoamI;
+    sths34pf80_read(STHS34PF80_WHO_AM_I, &whoamI, 1);
+    DEBUG_TRACE("STHS34PF80 Device ID: 0x%x", whoamI);
+
+    atm_asm_move(S_TBL_IDX, WURX_OP_MODULE_INIT);
+
+    RV_PLF_PREVENT_HIBERNATION_ADD_LAST(wurx_adv_prevent_hib);
+
+    // Don't use the app in the ROM
+    return RV_DONE;
+}
+
+#ifdef CFG_PHONE_WAKEUP
+/**
+ * @brief Swap WURX configuration between BT inquiry and iBeacon periodically.
+ * Send WURX advertisements if BT inquiry or iBeacon is detected.
+ * @note Called when restart timer is expired or the system is awake by WURX
+ * @param status Wake up status
+ */
+static rep_vec_err_t wurx_plf_awoken(uint32_t status)
+{
+    if (atm_asm_get_current_state(S_TBL_IDX) != WURX_S_IDLE) {
+	return RV_NEXT;
+    }
+    uint16_t wurx_cnt_det0;
+    WRPR_CTRL_PUSH(CMSDK_PMU, WRPR_CTRL__CLK_ENABLE) {
+	WURX_WURX1_RB__TYPE wurx1_rb_1 = PMU_WURX_READ(WURX1_RB_REG_ADDR);
+	wurx_cnt_det0 = WURX_WURX1_RB__CNT_DET0__READ(wurx1_rb_1);
+    } WRPR_CTRL_POP();
+
+    if (wurx_cnt_det0 > 1) {
+	atm_pm_lock(wurx_adv_lock_hiber);
+	ATM_LOG(D, "%s detected... Waking", swap_config ? "BT Inquiry" :
+	    "iBeacon");
+	adv_wurx = true;
+	atm_asm_move(S_TBL_IDX, WURX_OP_RECONFIG_ADV);
+    }
+    struct PMU_wurx_s const *wurx = swap_config ? &ibeacon_config :
+	&bt_inquiry_config;PM_LOCK_HIBERNATE
+    swap_config = !swap_config;
+
+    // Fire up PSEQ
+    WRPR_CTRL_SET(CMSDK_PSEQ, WRPR_CTRL__CLK_ENABLE);
+    {
+	// Power up WURX, take out of reset, enable
+	CMSDK_PSEQ->WURX_CONFIG = PSEQ_WURX_CONFIG__WURX_CUTVDD_B__MASK;
+	CMSDK_PSEQ->WURX_CONFIG = PSEQ_WURX_CONFIG__WURX_CUTVDD_B__MASK |
+	    PSEQ_WURX_CONFIG__WURX_RSTB__MASK;
+	CMSDK_PSEQ->WURX_CONFIG = PSEQ_WURX_CONFIG__WURX_CUTVDD_B__MASK |
+	    PSEQ_WURX_CONFIG__WURX_RSTB__MASK | PSEQ_WURX_CONFIG__WURX_EN__MASK;
+    }
+    // Done with PSEQ
+    WRPR_CTRL_SET(CMSDK_PSEQ, WRPR_CTRL__CLK_DISABLE);
+
+    // Fire up PMU_SPI
+    WRPR_CTRL_PUSH(CMSDK_PMU, WRPR_CTRL__CLK_ENABLE) {
+	// Enable WURX 32KHz clk
+	{
+	    uint32_t PMU11_REG = PMU_TOP_READ(PMU11_REG_ADDR);
+	    uint32_t PMU11_REG_save = PMU11_REG;
+
+	    PMU_PMU11__WURX_CLK_EN__SET(PMU11_REG);
+	    if (PMU11_REG_save != PMU11_REG) {
+		PMU_TOP_WRITE(PMU11_REG_ADDR, PMU11_REG);
+	    }
+	}
+	uint32_t len = sizeof(*wurx);
+	PMU_WURX_PROG(*wurx, len, WURX_GENERAL_REG_ADDR);
+	PMU_WURX_PROG(*wurx, len, WURX0_0_REG_ADDR);
+	PMU_WURX_PROG(*wurx, len, WURX0_1_REG_ADDR);
+	PMU_WURX_PROG(*wurx, len, WURX0_2_REG_ADDR);
+	PMU_WURX_PROG(*wurx, len, WURX0_3_REG_ADDR);
+	PMU_WURX_PROG(*wurx, len, WURX0_4_REG_ADDR);
+	PMU_WURX_PROG(*wurx, len, WURX1_0_REG_ADDR);
+	PMU_WURX_PROG(*wurx, len, WURX1_1_REG_ADDR);
+    } WRPR_CTRL_POP();
+
+    return RV_NEXT;
+}
+
+/**
+ * @brief Enable WURX algorithm 1 only in retain all vector.
+ * @note Called before the system enters retain power saving mode.
+ * @param sleep Pointer to sleep control.
+ * @param duration Sleep duration.
+ * @param int_set Interrupt enable set.
+ */
+__FAST static rep_vec_err_t
+wurx_retain_all(bool *sleep, int32_t duration, uint32_t int_set)
+{
+    set_wurx0_enabled(false);
+    set_wurx1_enabled(true);
+    return RV_NEXT;
+}
+#endif // CFG_PHONE_WAKEUP
+
+/**
+ * user_main()
+ * Driver initialization and rep_vec additions
+ */
+int main(void)
+{
+    /**
+     * Vector replacement
+     */
+    RV_APPM_INIT_ADD_LAST(wurx_adv_init);
+
+#ifdef CFG_PHONE_WAKEUP
+    RV_PLF_AWOKEN_ADD(wurx_plf_awoken);
+    RV_PLF_RETAIN_ALL_ADD(wurx_retain_all);
+#endif
+    ATM_LOG(D, "user_main() done");
+    return 0;
+}
