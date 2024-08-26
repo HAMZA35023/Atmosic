@@ -1,0 +1,109 @@
+Atmosic Presence Detection
+/**
+ *******************************************************************************
+ *
+ * @file sths34pf80.c
+ *
+ * @brief STHS34PF80 IR sensor driver
+ *
+ * Copyright (C) Your Company 2023
+ *
+ *******************************************************************************
+ */
+
+#include "arch.h"
+#include "sths34pf80_reg.h"
+#include "i2c.h"
+#include "pinmux.h"
+#include <stdio.h>
+
+#define I2C_CLK_100K 100000
+
+static i2c_dev_t i2c_dev = {
+    .base = CMSDK_I2C1,
+    .enable_data_pullup = true
+};
+
+int sths34pf80_read(uint8_t reg_addr, uint8_t *data, int length) {
+    i2c_beginTransmission(&i2c_dev, I2C_SHTS34PF80_ADDR);
+    i2c_write_byte(&i2c_dev, reg_addr);
+    int ret = i2c_endTransmission(&i2c_dev, false);
+    if (ret != I2C_ET_SUCCESS) {
+        DEBUG_TRACE("I2C read error: %d", ret);
+        return -1;
+    }
+    ret = i2c_requestFrom(&i2c_dev, I2C_SHTS34PF80_ADDR, length, true);
+    if (ret != length) {
+        DEBUG_TRACE("I2C read length error: %d", ret);
+        return -1;
+    }
+    for (int i = 0; i < length; i++) {
+        data[i] = i2c_read(&i2c_dev);
+    }
+    return length;
+}
+
+int sths34pf80_write(uint8_t reg_addr, uint8_t *data, int length) {
+    i2c_beginTransmission(&i2c_dev, I2C_SHTS34PF80_ADDR);
+    i2c_write_byte(&i2c_dev, reg_addr);
+    length = i2c_write_block(&i2c_dev, data, length);
+    int ret = i2c_endTransmission(&i2c_dev, true);
+    if (ret != I2C_ET_SUCCESS) {
+        DEBUG_TRACE("I2C write error: %d", ret);
+        return -1;
+    }
+    return length;
+}
+
+void sths34pf80_init(uint8_t init_flags) {
+    // Initialize I2C
+    i2c_init(&i2c_dev);
+    i2c_SetClock(&i2c_dev, I2C_CLK_100K);
+
+    // Read WHO_AM_I register
+    uint8_t who_am_i;
+    DEBUG_TRACE("STHS34PF80 Device ID Before: 0x%x", who_am_i);
+    if (sths34pf80_read(STHS34PF80_WHO_AM_I, &who_am_i, 1) != 1) {
+        DEBUG_TRACE("Failed to read WHO_AM_I register");
+        return;
+    }
+    if (who_am_i != STHS34PF80_ID) {
+        DEBUG_TRACE("Invalid device ID: 0x%x", who_am_i);
+        return;
+    }
+
+    DEBUG_TRACE("STHS34PF80 Device ID: 0x%x", who_am_i);
+    // Initialize control registers based on init_flags
+    uint8_t ctrl1 = 0x01;
+    uint8_t ctrl2 = 0x02;
+    uint8_t ctrl3 = 0x00;
+    // Setup based on init_flags (this is an example, adjust as needed)
+    ctrl1 |= (init_flags & 0x0F); // Example: setting ODR
+    sths34pf80_write(STHS34PF80_CTRL1, &ctrl1, 1);
+    sths34pf80_write(STHS34PF80_CTRL2, &ctrl2, 1);
+    sths34pf80_write(STHS34PF80_CTRL3, &ctrl3, 1);
+
+    DEBUG_TRACE("STHS34PF80 initialized successfully");
+}
+
+void sths34pf80_get_data(sths34pf80_data_t *out_data) {
+    uint8_t presence_l, presence_h;
+
+    // Read presence data
+    int ret = sths34pf80_read(STHS34PF80_PRESENCE_L, &presence_l, 1); // TPRESENCE_L (3Ah)
+    if (ret != 1) {
+        DEBUG_TRACE("Failed to read presence_l, I2C error code: %d", ret);
+        return;
+    }
+    ret = sths34pf80_read(STHS34PF80_PRESENCE_H, &presence_h, 1); // TPRESENCE_H (3Bh)
+    if (ret != 1) {
+        DEBUG_TRACE("Failed to read presence_h, I2C error code: %d", ret);
+        return;
+    }
+
+    // Debug raw values
+    DEBUG_TRACE("Raw Presence: L=0x%x, H=0x%x", presence_l, presence_h);
+
+    // Combine MSB and LSB
+    out_data->signed_presence = (int16_t)((presence_h << 8) | presence_l);
+}
