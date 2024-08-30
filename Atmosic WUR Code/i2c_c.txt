@@ -1,0 +1,360 @@
+/**
+ *******************************************************************************
+ *
+ * @file i2c.c
+ *
+ * @brief I2C master interface
+ *
+ * Copyright (C) Atmosic 2017-2023
+ *
+ *******************************************************************************
+ */
+
+#include "arch.h"
+
+#include "i2c.h"
+
+#include "at_wrpr.h"
+#include "at_apb_i2c_regs_core_macro.h"
+#include "at_pinmux.h"
+#include "atm_bp_clock.h"
+#include "pinmux.h"
+#include "at_apb_pseq_regs_core_macro.h"
+
+// Allocate memory to store references to multiple I2C instances. Used in
+// supporting their simultaneous instantiation.
+static i2c_dev_t *i2cdev[I2C_INSTANCE_MAX];
+
+__FAST static void i2c_pseq_latch_close(void)
+{
+    WRPR_CTRL_SET(CMSDK_PSEQ, WRPR_CTRL__CLK_ENABLE);
+    {
+	PSEQ_CTRL0__I2C_LATCH_OPEN__CLR(CMSDK_PSEQ->CTRL0);
+    }
+    WRPR_CTRL_SET(CMSDK_PSEQ, WRPR_CTRL__CLK_DISABLE);
+}
+
+__FAST static rep_vec_err_t
+i2c_back_from_retain_all(void)
+{
+    for (int i = 0; i < I2C_INSTANCE_MAX; i++) {
+	i2c_dev_t *i2c = i2cdev[i];
+	if (!i2c) {
+	    continue;
+	}
+
+	if (i2c->base == CMSDK_I2C0) {
+	    PINMUX_I2C_SET(0);
+	} else {
+	    PINMUX_I2C_SET(1);
+	}
+    }
+
+    i2c_pseq_latch_close();
+
+    return (RV_NEXT);
+}
+
+__FAST static rep_vec_err_t
+i2c_plf_hibernate_or_retain_all(bool *sleep, int32_t duration,
+    uint32_t *int_set)
+{
+    for (int i = 0; i < I2C_INSTANCE_MAX; i++) {
+	i2c_dev_t *i2c = i2cdev[i];
+	if (!i2c) {
+	    continue;
+	}
+
+	// Change the clock pin to an input to avoid leakage
+	if (i2c->base == CMSDK_I2C0) {
+	    PINMUX_I2C_CLR(0);
+	} else {
+	    PINMUX_I2C_CLR(1);
+	}
+    }
+
+    return (RV_NEXT);
+}
+
+void i2c_init(i2c_dev_t *i2c)
+{
+    if (i2c->base == CMSDK_I2C0) {
+	// Configure pinmux for i2c0
+	PINMUX_I2C_SET(0);
+	WRPR_CTRL_SET(CMSDK_I2C0, WRPR_CTRL__CLK_ENABLE);
+
+	// Reserve an index for the i2c instance
+	i2cdev[I2C0_INSTANCE_ID] = i2c;
+    } else {
+	// Configure pinmux for i2c1
+	PINMUX_I2C_SET(1);
+	WRPR_CTRL_SET(CMSDK_I2C1, WRPR_CTRL__CLK_ENABLE);
+
+	// Reserve an index for the i2c instance
+	i2cdev[I2C1_INSTANCE_ID] = i2c;
+    }
+
+    i2c->rx_head = i2c->rx_tail = 0;
+    i2c->tx_head = i2c->tx_tail = 0;
+
+    i2c_pseq_latch_close();
+}
+
+void i2c_deinit(i2c_dev_t *i2c) 
+{ 
+    if (i2c->base == CMSDK_I2C0) { 
+        WRPR_CTRL_SET(CMSDK_I2C0, WRPR_CTRL__CLK_DISABLE); 
+        PINMUX_I2C_CLR(0); 
+
+        // Free an index for the i2c instance 
+        i2cdev[I2C0_INSTANCE_ID] = NULL; 
+    } else { 
+        // Configure pinmux for i2c1 
+        WRPR_CTRL_SET(CMSDK_I2C1, WRPR_CTRL__CLK_DISABLE); 
+        PINMUX_I2C_CLR(1); 
+
+        // Reserve an index for the i2c instance 
+        i2cdev[I2C1_INSTANCE_ID] = NULL; 
+    } 
+}
+
+__attribute__((constructor))
+static void i2c_init_constructor(void)
+{
+    RV_PLF_HIBERNATE_ADD(i2c_plf_hibernate_or_retain_all);
+    RV_PLF_RETAIN_ALL_ADD(i2c_plf_hibernate_or_retain_all);
+    RV_PLF_BACK_FROM_RETAIN_ALL_ADD(i2c_back_from_retain_all);
+}
+
+void i2c_SetClock(i2c_dev_t *i2c, uint32_t Hertz)
+{
+    ASSERT_ERR((Hertz >= I2C_MIN_HZ) && (Hertz <= I2C_MAX_HZ));
+    uint32_t clkdiv = (atm_bp_clock_get() / (Hertz * 4)) - 1;
+
+    i2c->base->CLOCK_CONTROL = I2C_CLOCK_CONTROL__CLKDIV__WRITE(clkdiv);
+}
+
+typedef enum i2c_head_e {
+    I2C_HEAD_START = 0,
+    I2C_HEAD_STALL
+} i2c_head_t;
+
+typedef enum i2c_rw_e {
+    I2C_WRITE = 0,
+    I2C_READ
+} i2c_rw_t;
+
+typedef enum i2c_ack_e {
+    // ACK is active low
+    I2C_ACK = 0,
+    I2C_NACK
+} i2c_ack_t;
+
+typedef enum i2c_tail_e {
+    I2C_TAIL_STOP = 0,
+    I2C_TAIL_STALL,
+    I2C_TAIL_RESTART
+} i2c_tail_t;
+
+#define I2C_MAX_WAIT	100000
+
+static int i2c_out_sync(i2c_dev_t *i2c, i2c_head_t head, uint8_t data, i2c_tail_t tail)
+{
+    // Master drives all 8 data bits
+    i2c->base->OUTGOING_DATA =
+	(i2c->enable_data_pullup ? I2C_OUTGOING_DATA__DATA_PU__MASK : 0) |
+	I2C_OUTGOING_DATA__DATA_OE__WRITE(~data) |
+	I2C_OUTGOING_DATA__DATA_O__WRITE(data);
+
+    // Assert GO
+    i2c->base->TRANSACTION_SETUP = I2C_TRANSACTION_SETUP__GO__MASK |
+	// ACK is active low
+	I2C_TRANSACTION_SETUP__ACK_VALUE_TO_DRIVE__MASK |
+	I2C_TRANSACTION_SETUP__TAIL__WRITE(tail) |
+	I2C_TRANSACTION_SETUP__MSTR__WRITE(1) |
+	I2C_TRANSACTION_SETUP__HEAD__WRITE(head);
+
+    int ret;
+    int i = 0;
+    uint32_t status;
+    for (;;) {
+	status = i2c->base->TRANSACTION_STATUS;
+
+	if (!(status & I2C_TRANSACTION_STATUS__RUNNING__MASK)) {
+	    break;
+	}
+	if (i++ > I2C_MAX_WAIT) {
+	    ret = -1;
+	    goto done;
+	}
+    }
+    // ACK is active low
+    ret = (status & I2C_TRANSACTION_STATUS__ACK_VALUE__MASK) ? -2 : 0;
+
+done:
+    // Deassert GO
+    i2c->base->TRANSACTION_SETUP = I2C_TRANSACTION_SETUP__MSTR__WRITE(1) |
+	I2C_TRANSACTION_SETUP__GO__WRITE(0);
+    return ret;
+}
+
+static int i2c_in_sync(i2c_dev_t *i2c, i2c_ack_t ack, i2c_tail_t tail)
+{
+    // Master listens all 8 data bits
+    i2c->base->OUTGOING_DATA =
+	(i2c->enable_data_pullup ? I2C_OUTGOING_DATA__DATA_PU__MASK : 0);
+
+    // Assert GO
+    i2c->base->TRANSACTION_SETUP = I2C_TRANSACTION_SETUP__GO__MASK |
+	I2C_TRANSACTION_SETUP__ACK_VALUE_TO_DRIVE__WRITE(ack) |
+	I2C_TRANSACTION_SETUP__MASTER_DRIVES_ACK__MASK |
+	I2C_TRANSACTION_SETUP__MSTR__WRITE(1) |
+	I2C_TRANSACTION_SETUP__TAIL__WRITE(tail) |
+	I2C_TRANSACTION_SETUP__HEAD__WRITE(I2C_HEAD_STALL);
+
+    int ret;
+    int i = 0;
+    while (i2c->base->TRANSACTION_STATUS & I2C_TRANSACTION_STATUS__RUNNING__MASK) {
+	if (i++ > I2C_MAX_WAIT) {
+	    ret = -1;
+	    goto done;
+	}
+	YIELD();
+    }
+    ret = i2c->base->INCOMING_DATA;
+
+done:
+    // Deassert GO
+    i2c->base->TRANSACTION_SETUP = I2C_TRANSACTION_SETUP__MSTR__WRITE(1) |
+	I2C_TRANSACTION_SETUP__GO__WRITE(0);
+    return ret;
+}
+
+int i2c_requestFrom(i2c_dev_t *i2c, uint8_t address, int quantity, bool stop)
+{
+    if (!quantity) {
+	return 0;
+    }
+    if ((quantity < 0) || (quantity > I2C_BUF_SIZE)) {
+	return -I2C_ET_TOO_LONG;
+    }
+
+    i2c->rx_head = i2c->rx_tail = 0;
+
+    if (i2c_out_sync(i2c, I2C_HEAD_START, (address << 1) | I2C_READ, I2C_TAIL_STALL) < 0) {
+	return -I2C_ET_ADDR_NACK;
+    }
+
+    // Compensate for last read being outside of loop
+    int ret = 1;
+
+    for (; ret < quantity; ret++) {
+	int data = i2c_in_sync(i2c, I2C_ACK, I2C_TAIL_STALL);
+	if (data < 0) {
+	    return -I2C_ET_DATA_NACK;
+	}
+	i2c->rx_buf[i2c->rx_head++] = data;
+    }
+    // Last read
+    {
+	int data = i2c_in_sync(i2c, I2C_NACK, stop ? I2C_TAIL_STOP : I2C_TAIL_RESTART);
+	if (data < 0) {
+	    return -I2C_ET_DATA_NACK;
+	}
+	i2c->rx_buf[i2c->rx_head++] = data;
+    }
+
+    return ret;
+}
+
+int i2c_available(i2c_dev_t *i2c)
+{
+    return (i2c->rx_head - i2c->rx_tail);
+}
+
+uint8_t i2c_read(i2c_dev_t *i2c)
+{
+    return ((i2c->rx_tail < i2c->rx_head) ? i2c->rx_buf[i2c->rx_tail++] : 0);
+}
+
+void i2c_beginTransmission(i2c_dev_t *i2c, uint8_t address)
+{
+    i2c->tx_head = i2c->tx_tail = 0;
+    i2c->tx_address = address;
+}
+
+int i2c_write_byte(i2c_dev_t *i2c, uint8_t value)
+{
+    if (i2c->tx_head < I2C_BUF_SIZE) {
+	i2c->tx_buf[i2c->tx_head++] = value;
+	return 1;
+    }
+
+    // Indicate overflow
+    i2c->tx_head = I2C_BUF_SIZE + 1;
+    return 0;
+}
+
+int i2c_write_string(i2c_dev_t *i2c, const char *string)
+{
+    int ret = 0;
+    for (;; ret++) {
+	char c = *string++;
+	if (!c) {
+	    break;
+	}
+	if (i2c_write_byte(i2c, c) != 1) {
+	    break;
+	}
+    }
+
+    return ret;
+}
+
+int i2c_write_block(i2c_dev_t *i2c, const uint8_t *data, int length)
+{
+    int ret = 0;
+    for (; length-- > 0; ret++) {
+	if (i2c_write_byte(i2c, *data++) != 1) {
+	    break;
+	}
+    }
+
+    return ret;
+}
+
+i2c_et_t i2c_endTransmission(i2c_dev_t *i2c, bool stop)
+{
+    if (i2c->tx_head > I2C_BUF_SIZE) {
+	return I2C_ET_TOO_LONG;
+    }
+
+    i2c_tail_t tail = stop ? I2C_TAIL_STOP : I2C_TAIL_RESTART;
+
+    // Anything to transmit?
+    bool no_data = (i2c->tx_head == i2c->tx_tail);
+
+    if (i2c_out_sync(i2c, I2C_HEAD_START, (i2c->tx_address << 1) | I2C_WRITE,
+	no_data ? tail : I2C_TAIL_STALL) < 0) {
+	return I2C_ET_ADDR_NACK;
+    }
+
+    if (no_data) {
+	return I2C_ET_SUCCESS;
+    }
+
+    // Compensate for last write being outside of loop
+    int loop_end = i2c->tx_head - 1;
+
+    for (; i2c->tx_tail < loop_end;) {
+	if (i2c_out_sync(i2c, I2C_HEAD_STALL, i2c->tx_buf[i2c->tx_tail++], I2C_TAIL_STALL) < 0) {
+	    return I2C_ET_DATA_NACK;
+	}
+    }
+    // Last write
+    if (i2c_out_sync(i2c, I2C_HEAD_STALL, i2c->tx_buf[i2c->tx_tail++], tail) < 0) {
+	return I2C_ET_DATA_NACK;
+    }
+
+    return I2C_ET_SUCCESS;
+}

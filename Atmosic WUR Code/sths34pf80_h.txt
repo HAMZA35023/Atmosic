@@ -1,0 +1,52 @@
+/**
+ *******************************************************************************
+ *
+ * @file sths34pf80.h
+ *
+ * @brief STHS34PF80 IR sensor driver
+ *
+ * Copyright (C) Your Company 2023
+ *
+ *******************************************************************************
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define I2C_SHTS34PF80_ADDR 0x5A // Replace with actual I2C address if different
+
+// Register addresses
+#define STHS34PF80_WHO_AM_I      0x0F
+#define STHS34PF80_CTRL1         0x20
+#define STHS34PF80_CTRL2         0x21
+#define STHS34PF80_CTRL3         0x22
+#define STHS34PF80_STATUS        0x23
+#define STHS34PF80_TOBJECT_L     0x26
+#define STHS34PF80_TOBJECT_H     0x27
+#define STHS34PF80_TAMBIENT_L    0x28
+#define STHS34PF80_TAMBIENT_H    0x29
+#define STHS34PF80_PRESENCE_L    0x3A
+#define STHS34PF80_PRESENCE_H    0x3B
+
+#define STHS34PF80_ID            0xD3 // Expected WHO_AM_I register value
+
+typedef struct {
+    int16_t signed_temp;
+    int16_t signed_presence;
+} sths34pf80_data_t;
+
+void sths34pf80_init(uint8_t init_flags);
+void sths34pf80_deinit(void);
+void sths34pf80_get_data(sths34pf80_data_t *out_data);
+int sths34pf80_read(uint8_t reg_addr, uint8_t *data, int length);
+int sths34pf80_write(uint8_t reg_addr, uint8_t *data, int length);
+
+#ifdef __cplusplus
+}
+#endif

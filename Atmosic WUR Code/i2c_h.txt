@@ -1,0 +1,165 @@
+/**
+ *******************************************************************************
+ *
+ * @file i2c.h
+ *
+ * @brief I2C master interface
+ *
+ * Copyright (C) Atmosic 2017-2022
+ *
+ *******************************************************************************
+ */
+
+#ifndef __I2C_H__
+#define __I2C_H__
+
+/**
+ * @defgroup I2C I2C
+ * @ingroup DRIVERS
+ * @brief User driver for I2C master interface
+ * @{
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// Static buffer size for device structure
+#ifndef I2C_BUF_SIZE
+#define I2C_BUF_SIZE	16
+#endif // I2C_BUF_SIZE
+
+/// Lowest 7-bit address
+#define I2C_MIN_ADDR	1
+/// Highest 7-bit address
+#define I2C_MAX_ADDR	127
+
+/// I2C min clock speed 3.9 kHz
+#define I2C_MIN_HZ 3906
+/// I2C max clock speed 2 MHz
+#define I2C_MAX_HZ 2000000
+
+typedef enum {
+    I2C0_INSTANCE_ID,
+    I2C1_INSTANCE_ID,
+    I2C_INSTANCE_MAX,
+} i2c_instance_id_t;
+
+/// Device structure
+typedef struct i2c_dev_s {
+    CMSDK_AT_APB_I2C_TypeDef *base;
+    bool enable_data_pullup;
+
+    int rx_head, rx_tail;
+    uint8_t rx_buf[I2C_BUF_SIZE];
+
+    int tx_head, tx_tail;
+    uint8_t tx_address;
+    uint8_t tx_buf[I2C_BUF_SIZE];
+} i2c_dev_t;
+
+/// endTransmission() return codes
+typedef enum i2c_et_e {
+    I2C_ET_SUCCESS = 0,
+    I2C_ET_TOO_LONG,
+    I2C_ET_ADDR_NACK,
+    I2C_ET_DATA_NACK,
+    I2C_ET_ERR
+} i2c_et_t;
+
+/**
+ * @brief Initialize I2C device structure.
+ * @note Before calling, set the base field in the device structure.
+ * @param[in,out] i2c Device structure.
+ */
+void i2c_init(i2c_dev_t *i2c);
+
+
+void i2c_deinit(i2c_dev_t *i2c);
+
+/**
+ * @brief Configure I2C clock frequency.
+ * @param[in,out] i2c   Device structure.
+ * @param[in]     Hertz Clock frequency should be between 3.9 kHz and 2 MHz.
+ */
+void i2c_SetClock(i2c_dev_t *i2c, uint32_t Hertz);
+
+
+/**
+ * @brief Initiate read transaction from I2C slave device.
+ * @param[in,out] i2c      Device structure.
+ * @param[in]     address  Byte address written to bus by master.
+ * @param[in]     quantity Number of bytes to read from slave.
+ * @param[in]     stop     Signal stop after transaction.
+ * @return Success: number of bytes requested from bus.
+ * Failure: negative i2c_et_t failure code.
+ */
+int i2c_requestFrom(i2c_dev_t *i2c, uint8_t address, int quantity, bool stop);
+
+/**
+ * @brief Poll status of current read transaction.
+ * @param[in,out] i2c Device structure.
+ * @return Number of bytes available to read via i2c_read().
+ */
+int i2c_available(i2c_dev_t *i2c);
+
+/**
+ * @brief Read next byte of data.
+ * @note Only call when i2c_avaialble() reports a positive value.
+ * @param[in,out] i2c Device structure.
+ * @return Next byte of data.
+ */
+uint8_t i2c_read(i2c_dev_t *i2c);
+
+
+/**
+ * @brief Initiate write transaction to I2C slave.
+ * @param[in,out] i2c     Device structure.
+ * @param[in]     address Byte address written to bus by master.
+ */
+void i2c_beginTransmission(i2c_dev_t *i2c, uint8_t address);
+
+/**
+ * @brief Append single byte to current write transaction.
+ * @param[in,out] i2c   Device structure.
+ * @param[in]     value Byte of data to append.
+ * @return Success: 1
+ * Failure: 0
+ */
+int i2c_write_byte(i2c_dev_t *i2c, uint8_t value);
+
+/**
+ * @brief Append characters to current write transaction.
+ * @param[in,out] i2c    Device structure.
+ * @param[in]     string Characters to append (excluding terminator).
+ * @return Number of characters actually added.
+ */
+int i2c_write_string(i2c_dev_t *i2c, const char *string);
+
+/**
+ * @brief Append bytes to current write transaction.
+ * @param[in,out] i2c    Device structure.
+ * @param[in]     data   Block of bytes to append.
+ * @param[in]     length Number of bytes to append.
+ * @return Number of bytes actually added.
+ */
+int i2c_write_block(i2c_dev_t *i2c, const uint8_t *data, int length);
+
+/**
+ * @brief Finalize current write transaction and wait for completion.
+ * @param[in,out] i2c  Device structure.
+ * @param[in]     stop Signal stop after transaction.
+ * @return See i2c_et_t error codes.
+ */
+i2c_et_t i2c_endTransmission(i2c_dev_t *i2c, bool stop);
+
+#ifdef __cplusplus
+}
+#endif
+
+/// @} I2C
+
+#endif // __I2C_H__
